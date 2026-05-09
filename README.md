@@ -29,7 +29,7 @@ When a single course accumulates enough specific context — student lists, scen
 
 ### `templates/`
 
-Pre-built `.docx` and `.pptx` files that match the locked design system. Useful when an AI chat needs to start from a working file rather than build from scratch.
+Pre-built `.docx` and `.pptx` files that match the locked design system, plus the `.js` builder scripts that generate them. Useful when an AI chat needs to start from a working file (or a working build script) rather than build from scratch.
 
 ### `rubrics/`
 
