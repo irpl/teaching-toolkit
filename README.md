@@ -33,7 +33,9 @@ Pre-built `.docx` and `.pptx` files that match the locked design system, plus th
 
 ### `rubrics/`
 
-Standalone marking rubrics that can be reused across courses or assessments. Coursework brief documents that include rubrics live with their course; standalone rubrics live here.
+Standalone marking rubrics that can be reused across courses or assessments, plus the grading skills used to apply them. Coursework brief documents that include rubrics live with their course; standalone rubrics live here.
+
+Inside `rubrics/` you'll find folders named `grade`, `grade-code`, `grade-database`, `grade-document`, `grade-presentation`, `grade-spreadsheet` — these are snapshots of the Claude Code skills installed at `~/.claude/skills/`. Each is a single `SKILL.md` describing how to grade a particular kind of student submission against a rubric. The repo copies are a snapshot for sharing and archival; the live versions used by Claude Code are the ones in `~/.claude/skills/`. Re-snapshot when they change meaningfully.
 
 ---
 
