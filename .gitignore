@@ -1,0 +1,16 @@
+# Python virtual environment for the Parakeet transcription pipeline
+parakeet-env/
+
+# Test artefacts produced while validating parakeet-setup.md.
+# test_clip.wav and the transcripts are derived from student submissions —
+# keep them out of git. test_parakeet.py / transcribe.py are committed.
+*_transcript.txt
+test_clip.wav
+bench_*
+
+# Byte-compiled files
+__pycache__/
+*.pyc
+
+# Dated backups kept on disk; git holds the real history.
+*.bak-*
