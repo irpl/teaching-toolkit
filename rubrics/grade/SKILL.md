@@ -77,39 +77,38 @@ If any of these are unclear, ask the user before proceeding.
 
 Many assignments include a video walkthrough (e.g., student explaining their code, defending their work, presentation recording). To grade these, transcribe the audio with timestamps so you can cite specific moments in feedback.
 
-**Required tools (already installed system-wide):**
+**Required tools (already installed):**
 - `ffmpeg` — to extract audio from the video container
-- `whisperx` — Python package for transcription with word-level timestamps, CUDA-accelerated
+- `asr.py` — the shared Parakeet TDT engine at `C:\Users\philo\Projects\teaching-toolkit\asr.py`. Any `python` works; it re-execs itself under the `parakeet-env` venv.
 
 **Hardware profile on this machine:**
 - GPU: NVIDIA RTX 3060 — **6 GB dedicated VRAM** (+ 8 GB shared, but don't rely on shared for CUDA compute)
-- Because `large-v3` in fp16 needs ~10 GB VRAM, **use `--compute_type int8`** (fits in ~3-4 GB). Accuracy is still strong; trade-off is a slight slowdown.
+- The engine handles the 6 GB ceiling itself: fp16, 600 s chunks, one worker subprocess per 3 chunks, resumable. You do not need to tune anything.
 
 **Standard workflow per video:**
 
 ```bash
-# 1. Extract audio (mono, 16 kHz wav is whisper's native input)
+# 1. Extract audio (mono, 16 kHz)
 ffmpeg -i "path/to/video.mp4" -vn -ac 1 -ar 16000 -acodec pcm_s16le "path/to/audio.wav"
 
-# 2. Transcribe with CUDA + int8 + large-v3, output JSON with timestamps
-whisperx "path/to/audio.wav" \
-    --model large-v3 \
-    --device cuda \
-    --compute_type int8 \
-    --output_format json \
-    --output_dir "path/to/"
+# 2. Transcribe
+python C:/Users/philo/Projects/teaching-toolkit/asr.py "path/to/audio.wav"
 ```
 
-- Save extracted audio and transcript inside the student's folder (e.g., `audio.wav`, `audio.json`) so the work is reusable if grading is re-run.
-- The resulting JSON contains `segments` with `start`, `end`, and `text` — quote these in feedback like `"(at 2:15) the student explains the discount logic..."`.
+- Writes `audio.txt` (readable `[m:ss]` segments), `audio.srt`, and `audio.json` (`{segments, words}` with word-level timestamps) next to the input.
+- Save extracted audio and transcript inside the student's folder so the work is reusable if grading is re-run.
+- Quote segments in feedback like `"(at 2:15) the student explains the discount logic..."`.
 - If a student submits `.m4a` or `.mov` audio-only, skip step 1 and transcribe directly.
-- If `whisperx` OOMs on a long video, lower to `--model medium` rather than chunking — large-v3 in int8 usually fits 30-60 min videos fine.
+- **Do not add `--diarize` for walkthroughs.** Diarization costs ~230 s per 30 min and a single-narrator video does not need it. It is for vivas only (see `/grade-viva`).
+- If a run dies partway, just re-run the same command — completed chunks are skipped.
+
+**Why Parakeet and not WhisperX:** measured on this GPU, Parakeet transcribes 30 min of audio in ~30 s of inference (~32× real time) versus WhisperX large-v3 int8 at ~126 s, with equivalent word accuracy. WhisperX remains installed as a fallback if the Parakeet stack is ever broken: `whisperx "audio.wav" --model large-v3 --device cuda --compute_type int8 --output_format json --output_dir "path/to/"`.
 
 **Multiple videos per student:**
 
 Some students submit more than one video. Filenames are **whatever the student chose** — could be descriptive ("explaining", "testing"), timestamps ("14-57-02.mp4"), generic ("video1", "video2"), or anything else. Do not assume any naming convention. Handle each independently:
 
-- Run the ffmpeg + whisperx pipeline **once per video**.
+- Run the ffmpeg + `asr.py` pipeline **once per video**.
 - Name the audio/transcript pair after the source video so they stay paired: e.g., `video1630465570.mp4` → `video1630465570.wav` + `video1630465570.json`.
 - When citing timestamps in feedback, **always include which video filename** — `"in video1630465570.mp4 at 0:42"` — so the lecturer can re-verify.
 - For screenshot extraction, include the source video in the filename: `frame_video1630465570_0-42.png`.
@@ -117,7 +116,7 @@ Some students submit more than one video. Filenames are **whatever the student c
 
 **Why timestamps matter — verification by screenshot:**
 
-The transcript alone is not sufficient evidence. Whisper can mis-hear technical terms, and a student saying "I wrote a while loop" does not prove the screen showed one. Use the timestamp to jump to that moment in the video and extract a frame so you can *see* what was on screen.
+The transcript alone is not sufficient evidence. ASR can mis-hear technical terms, and a student saying "I wrote a while loop" does not prove the screen showed one. Use the timestamp to jump to that moment in the video and extract a frame so you can *see* what was on screen.
 
 ```bash
 # Extract a frame at timestamp HH:MM:SS (or seconds like 135 for 2:15)
@@ -244,6 +243,50 @@ When grading the **first student** in an assignment, the feedback.md you produce
 
 - If `grades.csv` or `names.csv` exists, update it with the student's name and grade.
 - If no tracking file exists, create `grades.csv` with columns: `name,raw_score,percentage`
+
+## Step 7: Canvas-Facing Comment (on request)
+
+When the lecturer asks for a Canvas-facing comment alongside posting a grade, treat it as a **separate artefact** from `feedback.md`. The feedback file is the lecturer's record (with the AI Authorship Indicators section explicitly private); the Canvas comment is what the student sees in the gradebook — a short summary, not the full feedback.
+
+### Rules (apply to every Canvas comment)
+
+- **Keep it short — ~80–150 words.** A notice, not an essay. Neutral tone, no moralising, no lecturing.
+- **State the grade up front.**
+- **Be specific to this student's submission.** Pull from their `feedback.md` Strengths and Areas for Improvement — what they actually did, in their actual files. Don't write generic comments that could apply to anyone.
+- **End with the single most important next step**, not a list of five. What should they change next time?
+- **Never name the AI policy framework or its category labels.** Students aren't aware of category A/B/C, escalation tiers, or the framework document. Naming them turns a grade explanation into a policy citation and invites argument with the policy rather than the evidence. If you must reference an authorship finding, explain what the category *means* in plain language ("could not demonstrate understanding of the code submitted under your name") without saying which category it is.
+- **Don't say "AI" or "AI-generated".** Frame any authorship finding as inability to demonstrate authorship — that's what the viva or evidence actually measured. The student already knows whether they used AI.
+- **Leave out:** category names (A/B/C), framework references, baselines, similarity to other submissions, prior viva history, cluster investigations, comparisons to other students, lecturer-only AI Authorship Indicators content.
+
+### Default template (clean grade, no authorship concerns)
+
+```
+Grade: X/Y (Z%).
+
+[1–2 sentences naming what was done well — pulled from feedback.md Strengths, referencing specific files / methods / sections.]
+
+[1–2 sentences naming the main thing that cost marks — pulled from feedback.md Areas for Improvement. If there are multiple losses, name the biggest.]
+
+[Optional one-sentence forward-looking note: what to do differently next time, or a deliverables reminder.]
+```
+
+### Template for a viva-confirmed authorship failure
+
+```
+Final grade: X/Y.
+
+Your viva on [date] did not demonstrate understanding of the [code / work / paper] submitted under your name. You were unable to:
+
+- [specific failure, with quoted phrase if damning];
+- [specific failure];
+- [specific failure].
+
+Because you could not demonstrate authorship at the viva, the submission cannot be credited. The grade is final[ and no resubmission has been authorised | ; resubmission has been authorised under the conditions discussed].
+```
+
+### Pacing
+
+When the lecturer is posting grades to Canvas, they will usually walk through students one at a time. Produce **one Canvas comment per turn**, wait for "next" (or the next student named), then continue. Do not batch-generate comments for multiple students in a single response.
 
 ## Feedback Tone
 

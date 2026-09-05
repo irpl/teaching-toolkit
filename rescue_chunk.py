@@ -1,3 +1,9 @@
+"""RARELY NEEDED as of 2026-09-04. This existed because 180 s chunks failed
+unpredictably at ~5.06 GB peak. Chunk sizing is fixed (parakeet-setup.md §7.2)
+and asr.py now retries per batch and banks partial progress, so a chunk that
+cannot be transcribed at all should be genuinely rare. Kept as a last resort:
+it re-cuts a stuck chunk into 60 s slices, each in its own subprocess.
+"""
 """Rescue one stuck pipeline chunk by transcribing it in smaller sub-slices,
 each in its OWN subprocess (a dead CUDA context cannot be retried in-process --
 the retry blocks forever). Writes the pipeline's _words_chunk_<i>.json.

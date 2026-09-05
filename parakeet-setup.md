@@ -34,7 +34,7 @@ brackets:
   `huggingface_hub` auto-detects this env var, so no code needs to pass it.
 - **Two gated pyannote models must both be accepted** on your HF account
   (one-time, click "Agree" while logged in):
-  - https://huggingface.co/pyannote/speaker-diarization-3.1
+  - https://huggingface.co/pyannote/speaker-diarization-community-1
   - https://huggingface.co/pyannote/segmentation-3.0  ← *easy to miss; the
     diarization pipeline depends on it and fails with a 403 if it is not
     accepted, even when 3.1 is.*
@@ -184,10 +184,13 @@ positions. `benchmark_parakeet.py` is a working implementation — it uses
 5-minute chunks and stitches the word and segment timestamps. You lose a little
 context at each boundary; in practice that costs a word or two per cut.
 
-> **Superseded 2026-08-24.** 5-minute chunks no longer "sit comfortably inside
-> 6 GB". After the torch 2.11.0+cu130 upgrade, a 300 s chunk OOMs outright and
-> **180 s in fp16** is the working size. See §7.1. The production script is
-> `transcribe_chunked.py`, not `benchmark_parakeet.py`.
+> **Superseded twice — read §7.2 before tuning anything.** The 2026-08-24 note
+> here claimed a 300 s chunk OOMs and that 180 s in fp16 was the ceiling. That
+> conclusion was wrong: it blamed chunk length for what was actually the
+> CUDA-graph decoder's fixed buffer. Re-measured 2026-09-04, **600 s chunks in
+> fp16 peak at 3.77 GB and run at ~32x real time**. The production engine is
+> `asr.py`; `transcribe_chunked.py` is now a thin wrapper over it and
+> `benchmark_parakeet.py` is a historical artefact.
 
 `transcribe.py` does **not** chunk — it is fine for the short clips the grading
 skills usually handle, but feed it a 30-minute viva and it will OOM. For long
@@ -197,9 +200,15 @@ recordings, use the chunked approach from `benchmark_parakeet.py`.
 
 ## 6. Full pipeline: transcription + diarization + merge
 
-Committed as `transcribe.py`. Three things in it differ from a stock Parakeet +
-pyannote example — each is a fix for something that actually broke during
-setup (see §8):
+Committed as `transcribe.py`, which owns the diarization and merge logic.
+**It is not the entry point** — as of 2026-09-04 the engine you actually run is
+`asr.py` (chunking, worker isolation, resume, segment rebuild, output writing),
+and it imports `diarize()` / `assign_speakers()` / `format_transcript()` from
+here. `transcribe.py`'s own `__main__` still does a single unchunked pass, which
+is fine for short clips only.
+
+Three things in it differ from a stock Parakeet + pyannote example — each is a
+fix for something that actually broke during setup (see §8):
 
 1. **pyannote is fed an in-memory waveform**, not a file path — sidesteps the
    torchcodec/FFmpeg-shared-library problem.
@@ -257,7 +266,7 @@ def diarize(audio_path):
     pipeline input is always a 16 kHz mono WAV, we sidestep torchcodec entirely:
     load the audio with soundfile and hand pyannote an in-memory waveform.
     """
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+    pipeline = Pipeline.from_pretrained(DIAR_MODEL)  # community-1; see §9
     pipeline.to(torch.device("cuda"))
 
     wav, sr = sf.read(audio_path, dtype="float32")
@@ -368,16 +377,22 @@ length, so a long single pass OOMs regardless of how little else is loaded
 
 If you hit OOM:
 
-- For long audio, chunk it — this is the real fix (§5).
+- For long audio, chunk it — at **600 s**, not shorter (§7.2).
 - Close GPU-heavy apps and re-check headroom with `nvidia-smi`.
 - Drop Parakeet to FP16 explicitly: `model = model.half()` after `.to("cuda")`.
-  **As of 2026-08-24 this is no longer optional** — `transcribe_chunked.py` does
-  it by default (`FP16=0` to opt out). fp32 OOMs on real 180 s chunks.
+  **This is not optional** — `asr.py` does it by default (`FP16=0` to opt out).
+  fp32 peaks right at the card's free VRAM. Word counts match fp32 within
+  ~0.1 %, so there is no accuracy reason to run fp32.
 - The pyannote diarization-3.1 footprint is around 1.5 GB — usually fine alone.
 
 ---
 
 ### 7.1 The torch 2.11.0+cu130 regression (investigated 2026-08-24)
+
+> **Read §7.2 first.** The measurements below are real, but the conclusion
+> drawn from them — that chunk length was the binding constraint — was wrong.
+> Keep this section for the failure signatures and the debugging lore; ignore
+> its chunk-size advice.
 
 A 57-minute class that previously ran unattended took ~3 hours and needed two
 chunks rescued by hand. Measured facts, so the next person does not re-derive
@@ -424,6 +439,59 @@ manifest.json` while unwinding, which lands *last* and hides the cause. And
 bad allocation` are all downstream wreckage of an earlier OOM in the same
 process — not independent bugs. `bad allocation` in particular reads like host
 memory exhaustion but fired here with 8.8 GB of commit free.
+
+---
+
+### 7.2 Chunk sizing, re-measured (2026-09-04) — supersedes 7.1's conclusions
+
+§7.1 concluded that chunk length drove peak VRAM and that 180 s was the safe
+ceiling. **That was the wrong variable.** Peak allocation, measured properly in
+fp16 by transcribing prefixes of `bench_30min.wav` (one process per trial,
+`reset_peak_memory_stats()` immediately before `transcribe()`):
+
+| Chunk | CUDA graphs ON | CUDA graphs OFF | RTF (graphs on) |
+|-------|----------------|-----------------|-----------------|
+| 180 s | 3.77 GB | 1.88 GB | 31.9x |
+| 300 s | 3.77 GB | 2.28 GB | — |
+| 600 s | **3.77 GB** | 3.29 GB | **31.9x** |
+| 900 s | 4.30 GB | 4.30 GB | 30.2x |
+| 1200 s | 5.32 GB | 5.32 GB | 20.5x |
+| 1800 s | 7.34 GB | — | 20.0x |
+
+What this says:
+
+- **Below ~900 s, peak VRAM is FLAT in chunk length.** The CUDA-graph decoder
+  allocates a fixed ~3.8 GB static buffer that dominates everything else, so a
+  180 s chunk costs exactly as much VRAM as a 600 s chunk. Cutting chunks
+  shorter than 600 s buys **no headroom whatsoever** and costs a ~20 s model
+  load each. This is the direct opposite of what §7.1 assumed, and it is why
+  the 57-minute class in §7.1 took ~3 hours: it paid 19 model loads, 19
+  cooldowns and 19 headroom waits to avoid a ceiling that was not there.
+- **Above ~900 s the graph buffer stops mattering** and activation memory takes
+  over — both columns converge exactly (4.30, 5.32).
+- **1800 s reports 7.34 GB on a 6 GB card.** That is the Windows WDDM driver
+  spilling into shared system memory. It completes, but RTF collapses from 32x
+  to 20x, and it is not a configuration to rely on. A true single-pass over
+  long audio is still off the table — §5 stands, just at a different boundary.
+- **Disabling CUDA graphs is a trap.** It genuinely halves peak VRAM at short
+  chunk lengths, but it is ~1.8x slower (600 s: 34.3 s vs 18.8 s) and buys
+  nothing at the chunk size you actually want. `CUDA_GRAPHS=0` is kept in
+  `asr.py` only as an escape hatch for when another GPU app is resident.
+
+**The operating point is 600 s chunks, fp16, CUDA graphs on**, which is what
+`asr.py` ships. It leaves ~2.3 GB of margin — enough to absorb Chrome's
+~250 MB — at maximum throughput.
+
+**Also worth knowing:** the ~3.77 GB figure is steady-state. Whole-process peak
+including model load and graph warm-up is ~5.06 GB, and that spike happens once
+per *worker*, not once per chunk. `asr.py` therefore runs 3 chunks per worker,
+which both amortises the ~20 s model load and keeps the warm graph: measured
+18.8 s for a worker's first 600 s chunk, then ~5.2 s for each subsequent one.
+
+**Net effect.** 30 minutes of audio, transcription only: ~30 s of inference plus
+one model load. End-to-end with diarization: 5 min 42 s, of which **230 s is
+pyannote** — diarization is now the bottleneck by a wide margin, which is why
+it is opt-in (`--diarize`) rather than automatic.
 
 ---
 
@@ -492,10 +560,13 @@ engines, transcription only, RTX 3060 6 GB. Parakeet via `benchmark_parakeet.py`
 | Words produced | 4098 | 3935 |
 | Segments | 91 | 95 |
 | Segment length (min / max / median) | 0.8 / **283** / 8.6 s | 0.8 / 30 / 23 s |
-| Long audio in one pass | **no — OOMs, must chunk** | yes, handled natively |
+| Long audio in one pass | no — chunks at 600 s, handled by `asr.py` | yes, handled natively |
 
-**Speed:** Parakeet is **~2.6× faster end-to-end** (~2.8× on transcription
-alone) on this hardware.
+**Speed:** Parakeet was **~2.6× faster end-to-end** at the time of this benchmark.
+After the 2026-09-04 chunk-sizing fix (§7.2) the same 30-minute audio transcribes
+in ~30 s of inference rather than 44 s, and without the per-chunk model-load tax
+the old 180 s chunking imposed — call it **~4× faster than WhisperX** end-to-end
+today.
 
 **Accuracy:** no ground-truth transcript exists, so no WER — but the two
 outputs are near-identical on a spot-check (word counts within ~4 %, same
@@ -511,24 +582,65 @@ no sentence breaks, because TDT only splits on clear pauses. Parakeet's
 segment transcript to a human, or build segment-based feedback, you will want to
 re-segment its word stream yourself (split on word-gap > ~0.7 s).
 
-**Diarization** was not separately benchmarked — both pipelines use the same
-pyannote 3.1 backbone, so quality is equivalent by construction.
+### Diarization — 3.1 vs community-1 (2026-09-04)
+
+Same 30-minute single-speaker walkthrough, word assignment through
+`assign_speakers()`. The recording has exactly one speaker, so every word
+attributed to a second speaker is an error:
+
+| Pipeline | Turns | Misattributed words | Time |
+|---|---|---|---|
+| `speaker-diarization-3.1`, free-running | 465 | 65 / 4090 | 233 s |
+| `speaker-diarization-community-1`, free-running | 469 | 30 / 4090 | 227 s |
+| `community-1`, `num_speakers=1` | 448 | **0 / 4090** | 233 s |
+
+Two conclusions:
+
+- **community-1 supersedes 3.1.** Same `Pipeline` API, same `DiarizeOutput`
+  shape, drop-in swap, roughly half the misattribution. It is a genuinely
+  different pipeline — its own bundled embedding checkpoint and VBx-style
+  clustering (`threshold` 0.6, `Fa`/`Fb`) against 3.1's wespeaker + centroid.
+  `transcribe.py` now defaults to it; `DIAR_MODEL` overrides.
+- **Pinning the speaker count matters more than the model choice.** Left to
+  guess, *both* pipelines invent a speaker on single-speaker audio. Pass
+  `num_speakers` whenever you know it — `--speakers 2` for a viva,
+  `--speakers 1` for a walkthrough. It took the error rate to zero here.
+
+Diarization is also the slowest stage in the pipeline now, at ~230 s per 30 min
+of audio against ~30 s for transcription. That is why `asr.py` makes it opt-in.
 
 ### Verdict
 
-For the grading skills: Parakeet is the better **speed-critical batch**
-transcriber — 2.6× faster, equivalent word accuracy, native word timestamps.
-WhisperX stays the better choice when you want **readable segment transcripts
-out of the box** and **no chunking ceremony** on long recordings. A practical
-split: Parakeet for bulk walkthrough transcription, WhisperX for long vivas and
-anything a human will read raw.
+**Superseded 2026-09-04.** The original verdict split the work between the two
+engines: Parakeet for bulk transcription, WhisperX for anything a human reads
+raw, because Parakeet's own segment timestamps are unusable (one 283 s segment)
+and its chunking was fiddly. Both objections are now closed — `asr.py` rebuilds
+readable segments from the word stream (`segment()`, split on a >0.7 s word gap
+or a 30 s cap) and owns the chunking end-to-end. **Parakeet is now the default
+for everything**, and all the grading skills call `asr.py`.
+
+WhisperX remains installed as a fallback for when the Parakeet stack is broken
+(venv missing, NeMo import error); the grading skills document the exact
+command. It is no longer the recommended path for any job.
 
 ---
 
 ## 10. Optional: swap pyannote for Sortformer
 
-If you want to try NVIDIA's newer Sortformer diarization (better DER in their
-benchmarks), it's available in NeMo:
+**This is now the highest-value remaining optimisation, and it was not in
+2026-08.** Since the chunk-sizing fix (§7.2), transcription costs ~30 s per
+30 min of audio while pyannote diarization costs ~230 s — diarization is ~88 %
+of the wall clock on any diarized job. Published figures put Sortformer v2 at
+RTF ~214x, which would put that 230 s under 10 s.
+
+Caveats before anyone acts on that: it is capped at 4 speakers (fine for vivas,
+not for group sessions), the output format differs from pyannote's so
+`diarize()` and `assign_speakers()` both need rewriting, and the DER comparison
+is NVIDIA's own — independent benchmarking still puts pyannoteAI ahead on
+accuracy. Worth an afternoon if diarized turnaround ever becomes the
+bottleneck in practice; not worth it while vivas are occasional.
+
+If you want to try NVIDIA's Sortformer diarization, it's available in NeMo:
 
 ```python
 from nemo.collections.asr.models import SortformerEncLabelModel

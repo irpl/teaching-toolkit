@@ -10,12 +10,41 @@ This repo holds reusable assets that travel from one course to the next — meth
 
 ```
 teaching-toolkit/
+├── asr.py                The local speech-to-text engine (see below)
+├── transcribe.py         Diarization + word→speaker merge, used by asr.py
 ├── methodologies/        Generic guides for how to produce class content
 ├── course-specific/      Per-course handoff docs and reference material
 │   └── [course-code]/
 ├── templates/            Reusable .docx and .pptx templates
 └── rubrics/              Standalone marking rubrics
 ```
+
+### Transcription (`asr.py`)
+
+Every local speech-to-text job on this machine goes through `asr.py` — the
+grading skills, the video-summary pipeline, and the video editing skill all
+call it. It runs **NVIDIA Parakeet TDT 0.6b v3** on the 6 GB RTX 3060 and
+handles the VRAM ceiling itself (fp16, 600 s chunks, worker subprocesses,
+resumable).
+
+```bash
+# Transcribe. Writes <base>.txt / .srt / .json next to the input.
+python asr.py audio.wav
+
+# Add speaker labels. ALWAYS pass the speaker count when you know it.
+python asr.py audio.wav --diarize --speakers 2
+```
+
+Audio must be 16 kHz mono:
+`ffmpeg -i in.mp4 -vn -ac 1 -ar 16000 -acodec pcm_s16le out.wav`
+
+Rough costs on this GPU: ~1–2 min to transcribe 30 min of audio; add ~230 s if
+you pass `--diarize`. A run that dies partway is resumable — re-run the same
+command and banked chunks are skipped.
+
+Setup, tuning, benchmarks and the hard-won failure modes are in
+`parakeet-setup.md`. **Read §7.2 before changing any chunk-size setting** — the
+intuitive change (smaller chunks) buys nothing and costs a lot.
 
 ### `methodologies/`
 
@@ -35,7 +64,7 @@ Pre-built `.docx` and `.pptx` files that match the locked design system, plus th
 
 Standalone marking rubrics that can be reused across courses or assessments, plus the grading skills used to apply them. Coursework brief documents that include rubrics live with their course; standalone rubrics live here.
 
-Inside `rubrics/` you'll find folders named `grade`, `grade-code`, `grade-database`, `grade-document`, `grade-presentation`, `grade-spreadsheet`, `grade-viva` — these are snapshots of the Claude Code skills installed at `~/.claude/skills/`. Each is a single `SKILL.md` describing how to grade a particular kind of student submission against a rubric. The repo copies are a snapshot for sharing and archival; the live versions used by Claude Code are the ones in `~/.claude/skills/`. Re-snapshot when they change meaningfully.
+Inside `rubrics/` you'll find folders named `grade`, `grade-code`, `grade-cohort`, `grade-database`, `grade-document`, `grade-presentation`, `grade-spreadsheet`, `grade-video`, `grade-viva` — these are snapshots of the Claude Code skills installed at `~/.claude/skills/`. Each is a single `SKILL.md` describing how to grade a particular kind of student submission against a rubric. The repo copies are a snapshot for sharing and archival; the live versions used by Claude Code are the ones in `~/.claude/skills/`. Re-snapshot when they change meaningfully.
 
 ---
 

@@ -16,6 +16,11 @@ from pyannote.audio import Pipeline
 if not os.environ.get("HF_TOKEN"):
     sys.exit("HF_TOKEN is not set. See parakeet-setup.md section 3.")
 
+# community-1 supersedes speaker-diarization-3.1 (pyannoteAI, 2025): same
+# Pipeline API and same DiarizeOutput shape, better speaker counting and
+# assignment. Set DIAR_MODEL=pyannote/speaker-diarization-3.1 to go back.
+DIAR_MODEL = os.environ.get("DIAR_MODEL", "pyannote/speaker-diarization-community-1")
+
 
 def transcribe(audio_path):
     """Run Parakeet, return list of {start, end, word} dicts."""
@@ -37,20 +42,29 @@ def transcribe(audio_path):
     return words
 
 
-def diarize(audio_path):
+def diarize(audio_path, num_speakers=None, min_speakers=None, max_speakers=None):
     """Run pyannote, return list of (start, end, speaker) tuples.
+
+    Pass speaker counts whenever you know them — it is the single biggest
+    accuracy lever here. Left free, both 3.1 and community-1 invent a second
+    speaker on single-speaker walkthroughs (measured 2026-09-04 on the 30-min
+    benchmark: 3.1 misattributed 65 of 4090 words, community-1 30). A viva is
+    num_speakers=2; a student walkthrough is num_speakers=1.
 
     pyannote.audio 4.x decodes files via torchcodec, which needs FFmpeg *shared*
     libraries that the static 'essentials' FFmpeg build does not ship. Since the
     pipeline input is always a 16 kHz mono WAV, we sidestep torchcodec entirely:
     load the audio with soundfile and hand pyannote an in-memory waveform.
     """
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+    pipeline = Pipeline.from_pretrained(DIAR_MODEL)
     pipeline.to(torch.device("cuda"))
 
     wav, sr = sf.read(audio_path, dtype="float32")
     waveform = torch.from_numpy(wav).unsqueeze(0)  # (1, samples) — mono
-    diar = pipeline({"waveform": waveform, "sample_rate": sr})
+    hints = {k: v for k, v in (("num_speakers", num_speakers),
+                               ("min_speakers", min_speakers),
+                               ("max_speakers", max_speakers)) if v is not None}
+    diar = pipeline({"waveform": waveform, "sample_rate": sr}, **hints)
 
     # pyannote.audio 4.x returns a DiarizeOutput, not a bare Annotation.
     # exclusive_speaker_diarization has overlapping speech removed — each

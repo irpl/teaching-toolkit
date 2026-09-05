@@ -32,13 +32,19 @@ This pre-reading is what lets you tell "correct answer" from "rote answer" later
 
 ## Step 2: Transcribe with speaker diarization
 
-Follow the standard transcription workflow from /grade — extract audio with `ffmpeg`, transcribe with `whisperx` — but **add diarization** so each segment is labelled by speaker.
+Follow the standard transcription workflow from /grade — extract audio with `ffmpeg`, transcribe with `asr.py` — but **add `--diarize`** so each word is labelled by speaker.
 
 **One-time setup (per machine):**
 1. Create a free HuggingFace account.
-2. Accept the user agreement on the gated model: https://huggingface.co/pyannote/speaker-diarization-3.1 (and the segmentation model it depends on).
+2. Accept the user agreement on the gated model: https://huggingface.co/pyannote/speaker-diarization-community-1 (and the segmentation model it depends on).
 3. Generate a read-only access token at https://huggingface.co/settings/tokens.
-4. Store it as `HF_TOKEN` in the environment, or pass it on the command line each time.
+4. Store it as a Windows User env var so it's available to any subprocess without ever appearing in chat:
+   ```powershell
+   [Environment]::SetEnvironmentVariable("HF_TOKEN", "hf_xxxxxxxx", "User")
+   ```
+   Then fully restart VS Code / Claude Code so the new shell inherits it.
+
+**Before running the pipeline, verify the token is present** — never ask the user to paste it into chat. Check with `if ($env:HF_TOKEN) { "ok" } else { "missing" }` (PowerShell) or `[ -n "$HF_TOKEN" ] && echo ok || echo missing` (bash). If missing, point the user back to the setup block above and stop; do not prompt for the value.
 
 **Per-viva pipeline:**
 
@@ -47,31 +53,34 @@ Follow the standard transcription workflow from /grade — extract audio with `f
 ffmpeg -i "path/to/viva.mp4" -vn -ac 1 -ar 16000 -acodec pcm_s16le "path/to/audio.wav"
 
 # 2. Transcribe with diarization. Vivas are almost always exactly 2 speakers,
-#    so locking min/max to 2 improves accuracy and speed.
-whisperx "path/to/audio.wav" \
-    --model large-v3 \
-    --device cuda \
-    --compute_type int8 \
-    --diarize \
-    --hf_token "$HF_TOKEN" \
-    --min_speakers 2 \
-    --max_speakers 2 \
-    --output_format json \
-    --output_dir "path/to/"
+#    so pinning the count is the single biggest accuracy lever available here.
+python C:/Users/philo/Projects/teaching-toolkit/asr.py "path/to/audio.wav" \
+    --diarize --speakers 2
 ```
 
-The output JSON gains a `speaker` field on each segment (`SPEAKER_00`, `SPEAKER_01`).
+**Always pass `--speakers`.** Left to guess, the diarizer invents speakers: measured
+2026-09-04 on a 30-min single-speaker recording, it misattributed 30 of 4090 words
+free-running and **0 of 4090** with the count pinned. A viva is `--speakers 2`. If a
+third person genuinely speaks (an external examiner, a technician), pass 3.
+
+Outputs, next to the input:
+- `audio_transcript.txt` — speaker-labelled blocks, `[12.34] SPEAKER_00: ...`
+- `audio_words.json` — every word with `start`, `end`, `word`, `speaker`
+- `audio.txt` / `.srt` / `.json` — the plain readable transcript as well
+
+Budget ~230 s of diarization per 30 min of audio on top of transcription; a 45-min
+viva runs about 6–7 minutes end to end.
 
 **Identify which speaker is which:**
 The diarization labels are arbitrary — `SPEAKER_00` may be the lecturer or the student. Resolve this once, then use the labels consistently:
 
-- The first segment is almost always the lecturer opening the session — listen to (or read) the first ~30 seconds.
-- The lecturer typically asks more questions; the student typically gives longer answers. Run a quick check: count segments per speaker and average length per speaker.
+- The first block in `audio_transcript.txt` is almost always the lecturer opening the session — read the first ~30 seconds.
+- The lecturer typically asks more questions; the student typically gives longer answers. Quick check over `audio_words.json`: count words per speaker and mean block length per speaker.
 - If still ambiguous, extract a frame at any timestamp and check who's speaking on camera.
 
-Once identified, **rewrite the transcript JSON** (or work from a derived file) so labels read `[Lecturer]` and `[Student]`. Save this as `audio_diarized.txt` or similar inside the student folder so the work is reusable.
+Once identified, **rewrite the labels** in a derived file so they read `[Lecturer]` and `[Student]`. Save this as `audio_diarized.txt` inside the student folder so the work is reusable.
 
-**If a session has more than 2 speakers** (e.g., second examiner, group viva): set `--min_speakers` / `--max_speakers` to the actual count and resolve each label individually. Group vivas are messy — diarization regularly merges similar voices; spot-check a few timestamps before grading.
+**If a session has more than 2 speakers** (e.g., second examiner, group viva): pass the actual count to `--speakers` and resolve each label individually. Group vivas are messy — diarization regularly merges similar voices; spot-check a few timestamps before grading.
 
 ## Step 3: Structure the transcript as Q&A
 
@@ -215,6 +224,12 @@ Watch for these in addition to the general indicators in the shared /grade skill
 - **Reading-aloud cadence.** Long, complete, well-formed sentences with no hesitation, especially on technical topics, can indicate the student is reading from notes or a generated script. Listen for paper rustle / scroll noise.
 
 Score these in the AI Authorship Indicators section per the shared /grade format. **High** confidence is appropriate for any single one of: confident misnaming of own code, refusal to engage with own work, or sustained disagreement between answers and submission.
+
+## Student-facing comment (Canvas)
+
+See the shared `/grade` skill — **Step 7: Canvas-Facing Comment** — for the full rules and templates (default + viva-confirmed authorship failure). The viva-failure template is the relevant one when the viva concludes the student could not demonstrate authorship; everything else (rules about not naming the framework, not saying "AI", 80–150 words, cite specifics) applies the same way.
+
+**Viva-specific addition — cite 2–3 specific viva exchanges.** A short bulleted list of what they couldn't answer is more defensible than vague "your performance was poor." Pick factually unambiguous failures; quote damning phrases verbatim from the transcript.
 
 ## Pacing
 
